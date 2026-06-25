@@ -1,0 +1,34 @@
+How to run
+==========
+
+*** For a full explanation of modes and normal vs dataset runs, read:
+    PARAMETER_AND_RUN_GUIDE.txt  ***
+
+Quick start — thesis simulation (main_pass.m)
+---------------------------------------------
+1. Open MATLAB in this folder.
+2. Open main_pass.m.
+3. Choose mode:  param.rand_sc = 0  (conventional)  or  param.rand_sc = 1  (PASS)
+4. Run main_pass.m.
+5. MAT results → results/ folder. Run visualize_results.m on the .mat file.
+
+Quick start — large PASS dataset for DNN (generate_pass_dataset.m)
+------------------------------------------------------------------
+1. Open generate_pass_dataset.m.
+2. Set target_samples (e.g. 500) and fmincon_fast = true.
+3. Run the script. CSV files → csv_data/ folder.
+4. See DATASET_GENERATION.txt for training tips.
+
+Dataset convention
+==================
+
+Conventional output columns:
+   power_ant1, power_ant2, power_ant3
+
+PASS output columns:
+   PA1x1, PA2x1, PA3x1, PA1x2, PA2x2, PA3x2, PA1x3, PA2x3, PA3x3, power_wg1, power_wg2, power_wg3
+
+Fair EE comparison
+==================
+Run main_pass.m twice: once with rand_sc=0, once with rand_sc=1. Compare mean EE printed
+at the end of each run. Both modes use fmincon with the same QoS and power constraints.

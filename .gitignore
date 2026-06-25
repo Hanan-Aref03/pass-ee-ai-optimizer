@@ -1,0 +1,34 @@
+# MATLAB simulation outputs
+matlab/legacy/results/*
+!matlab/legacy/results/.gitkeep
+matlab/legacy/csv_data/*
+!matlab/legacy/csv_data/.gitkeep
+matlab/legacy/dataset_checkpoints/*
+!matlab/legacy/dataset_checkpoints/.gitkeep
+matlab/legacy/figures_from_visualize_results/*
+!matlab/legacy/figures_from_visualize_results/.gitkeep
+
+# Python build/runtime artifacts
+__pycache__/
+*.py[cod]
+*.pt
+*.pth
+*.ckpt
+*.npz
+*.npy
+
+# Generated data and training artifacts
+data/raw/*
+!data/raw/.gitkeep
+data/processed/*
+!data/processed/.gitkeep
+data/checkpoints/*
+!data/checkpoints/.gitkeep
+ml/pass_dnn/artifacts/*
+!ml/pass_dnn/artifacts/.gitkeep
+artifacts/*
+!artifacts/.gitkeep
+
+# OS noise
+.DS_Store
+Thumbs.db

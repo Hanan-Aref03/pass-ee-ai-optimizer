@@ -1,0 +1,246 @@
+================================================================================
+  PARAMETER AND RUN GUIDE
+  How to choose the simulation mode and how to run normal vs dataset generation
+================================================================================
+
+Read this file first. It explains the only parameters you usually need to change.
+
+
+--------------------------------------------------------------------------------
+PART 1 — QUICK DECISION: WHAT DO YOU WANT TO DO?
+--------------------------------------------------------------------------------
+
+  +---------------------------+------------------+---------------------------+
+  | Goal                      | Script to run    | Main setting              |
+  +---------------------------+------------------+---------------------------+
+  | Thesis: conventional BS   | main_pass.m      | param.rand_sc = 0         |
+  | Thesis: PASS comparison     | main_pass.m      | param.rand_sc = 1         |
+  | Large CSV for DNN training  | generate_pass_   | (rand_sc=1 inside script)|
+  |                           | dataset.m        | fmincon_fast = true       |
+  +---------------------------+------------------+---------------------------+
+
+  Rule:
+    - Thesis results, figures, EE comparison  →  main_pass.m
+    - Thousands of PASS labels for ML/DNN     →  generate_pass_dataset.m
+
+  Do NOT use main_pass.m in a loop hundreds of times for ML data.
+  Do NOT use generate_pass_dataset.m for thesis defense figures (use main_pass).
+
+
+--------------------------------------------------------------------------------
+PART 2 — CHOOSING THE SIMULATION MODE (CONVENTIONAL vs PASS)
+--------------------------------------------------------------------------------
+
+  There is ONE mode switch for the physics/architecture:
+
+      param.rand_sc
+
+  +-------------+--------------------------------------------------------------+
+  | rand_sc = 0 | CONVENTIONAL: 3 fixed BS antennas, optimize POWERS only      |
+  |             | Script path: main_pass → fmincon_main → fmincon_fpa         |
+  +-------------+--------------------------------------------------------------+
+  | rand_sc = 1 | PASS: 3 waveguides × 3 PAs, optimize POSITIONS + POWERS      |
+  |             | Script path: main_pass → fmincon_main → fmincon_pass         |
+  +-------------+--------------------------------------------------------------+
+
+  Where to set it:
+
+    (A) main_pass.m — line near "Mode selection":
+            param.rand_sc = 0;   % conventional
+            param.rand_sc = 1;   % PASS
+
+    (B) generate_pass_dataset.m — already fixed to PASS:
+            param.rand_sc = 1;   % do not change (ML labels are PASS only)
+
+  There is NO param.mov anymore. Random PASS was removed.
+  Only values 0 and 1 are valid for rand_sc.
+
+  Fair EE comparison for the thesis:
+    1) Run main_pass.m with param.rand_sc = 0  →  save results, note mean EE
+    2) Run main_pass.m with param.rand_sc = 1  →  save results, note mean EE
+    Both use fmincon with the same QoS and power budget.
+
+
+--------------------------------------------------------------------------------
+PART 3 — NORMAL RUN vs LARGE DATASET RUN
+--------------------------------------------------------------------------------
+
+  This is NOT controlled by rand_sc. It is controlled by WHICH SCRIPT you open
+  and (for PASS) whether "fast" fmincon is enabled.
+
+
+  A) NORMAL / THESIS RUN  →  main_pass.m
+  --------------------------------------
+  Purpose:
+    - Collect ~100 feasible Monte Carlo samples (default ct = 100)
+    - Save one .mat file with full results
+    - Export one pair of CSV files (optional, for inspection)
+    - Use visualize_results.m for plots
+
+  Key parameters in main_pass.m (top of file):
+
+    ct = 100;              Number of feasible samples to collect
+    param.rand_sc = 0/1;   Mode (see Part 2)
+    R_vec = [0.5];         QoS requirement(s) in bps/Hz
+
+  Optimizer accuracy:
+    - Uses FULL fmincon settings (10 random starts, Display iter)
+    - param.fmincon_fast is NOT set → accurate, slower
+    - Good for thesis numbers and defense plots
+
+  Outputs:
+    results/results_<mode_name>_R_<timestamp>.mat
+    csv_data/dataset_input_<mode>_*.csv
+    csv_data/dataset_output_<mode>_*.csv
+
+  Typical runtime:
+    - Conventional: moderate (3 power variables per sample)
+    - PASS: slow (12 variables per sample, 10 fmincon restarts)
+
+
+  B) LARGE DATASET RUN (DNN labels)  →  generate_pass_dataset.m
+  -------------------------------------------------------------
+  Purpose:
+    - Collect hundreds or thousands of labeled PASS samples
+    - Append rows to ONE growing input CSV + ONE output CSV
+    - Checkpoint every N samples (crash recovery)
+
+  Key parameters at top of generate_pass_dataset.m:
+
+    target_samples = 500;     How many feasible PASS rows you want
+    param.R = 0.5;            QoS for every row (bps/Hz)
+    fmincon_fast = true;      true = fast labels; false = accurate but very slow
+    checkpoint_every = 50;    Save checkpoint .mat every N feasible samples
+    max_attempts = 20 * target_samples;  Stop if too many infeasible tries
+
+  Mode:
+    - Always PASS (param.rand_sc = 1 inside the script)
+    - Conventional dataset is NOT built by this script
+
+  Optimizer when fmincon_fast = true:
+    - Sets param.fmincon_fast = true before calling fmincon_pass
+    - 3 random starts, Display off, lower MaxIter
+    - Labels are slightly less polished but fine for training a DNN
+
+  Optimizer when fmincon_fast = false:
+    - Same accuracy as main_pass PASS runs
+    - Use only for a small validation subset (e.g. 50 samples)
+
+  Outputs:
+    csv_data/dataset_input_pass_ml_<timestamp>.csv
+    csv_data/dataset_output_pass_ml_<timestamp>.csv
+    dataset_checkpoints/checkpoint_pass_<timestamp>_n*.mat
+
+  Typical workflow:
+    1) Set target_samples = 50, fmincon_fast = true, run once → check timing
+    2) Set target_samples = 2000, run overnight
+    3) Train DNN on the two CSV files (see DATASET_GENERATION.txt)
+
+
+  Summary table: normal vs dataset
+  +----------------------+-------------------------+---------------------------+
+  |                      | main_pass.m (normal)    | generate_pass_dataset.m   |
+  +----------------------+-------------------------+---------------------------+
+  | Conventional OK?     | yes (rand_sc=0)         | no (PASS only)            |
+  | PASS OK?             | yes (rand_sc=1)       | yes (always)              |
+  | Default # samples    | ct = 100                | target_samples = 500      |
+  | fmincon speed        | accurate (slow)         | fast by default           |
+  | Main output          | .mat + CSV              | large CSV (ML)            |
+  | Progress / append    | batch at end            | row-by-row append         |
+  +----------------------+-------------------------+---------------------------+
+
+
+--------------------------------------------------------------------------------
+PART 4 — OTHER IMPORTANT PARAMETERS (USUALLY LEAVE AS DEFAULT)
+--------------------------------------------------------------------------------
+
+  Shared physical parameters (main_pass.m and generate_pass_dataset.m):
+
+    param.Mu = 3        Number of users
+    param.D = 10        Area side length (m)
+    param.H = 5         BS / waveguide height (m)
+    param.Nwg = 3       Waveguides (PASS); also sets Na=3 in conventional
+    param.Nt = 3        PAs per waveguide (PASS only)
+    param.pbs           Total transmit power budget (20 dBm default)
+    param.pcircuit      Circuit power for EE denominator (10 dBm default)
+    param.f = 0.3       Carrier frequency (THz)
+
+  QoS:
+    main_pass.m         R_vec = [0.5];  can add more values, e.g. [0.3 0.5 0.7]
+    generate_pass_      param.R = 0.5;  single value per run (edit for diversity)
+    dataset.m
+
+  Advanced (optional, rarely changed):
+    param.fmincon_fast = true/false   Only read inside fmincon_pass.m
+    param.fmincon_restarts = N        Override number of fmincon random starts
+
+
+--------------------------------------------------------------------------------
+PART 5 — STEP-BY-STEP RECIPES
+--------------------------------------------------------------------------------
+
+  Recipe 1 — Conventional thesis run
+  ----------------------------------
+    1. Open main_pass.m
+    2. Set:  param.rand_sc = 0;
+    3. Optional: ct = 100;  R_vec = [0.5];
+    4. Run script (F5)
+    5. Note printed mean EE and path to .mat file
+    6. Run visualize_results.m, select the .mat file
+
+  Recipe 2 — PASS thesis run (fair comparison)
+  --------------------------------------------
+    1. Open main_pass.m
+    2. Set:  param.rand_sc = 1;
+    3. Run script
+    4. Compare mean EE with Recipe 1
+
+  Recipe 3 — Start ML dataset (test run)
+  --------------------------------------
+    1. Open generate_pass_dataset.m
+    2. Set:  target_samples = 50;
+             fmincon_fast = true;
+             param.R = 0.5;
+    3. Run script; watch progress in Command Window
+    4. Open csv_data/dataset_*_pass_ml_*.csv
+
+  Recipe 4 — Large ML dataset (overnight)
+  ---------------------------------------
+    1. Open generate_pass_dataset.m
+    2. Set:  target_samples = 2000;   (or 5000)
+             fmincon_fast = true;
+    3. Run; leave MATLAB open
+    4. Use output CSVs in Python/MATLAB for DNN training
+
+
+--------------------------------------------------------------------------------
+PART 6 — COMMON MISTAKES
+--------------------------------------------------------------------------------
+
+  X  Setting rand_sc = 1 but expecting conventional antennas
+     → PASS waveguides and PAs will be used.
+
+  X  Running main_pass 100 times for ML data
+     → Use generate_pass_dataset.m instead.
+
+  X  Using generate_pass_dataset for thesis EE tables without checking quality
+     → Use main_pass with fmincon_fast off (default there) for final numbers.
+
+  X  Setting rand_sc to anything other than 0 or 1
+     → Code will error.
+
+  X  Looking for param.mov (removed)
+     → Only rand_sc selects the mode.
+
+
+--------------------------------------------------------------------------------
+PART 7 — RELATED DOCUMENTATION FILES
+--------------------------------------------------------------------------------
+
+  RUN_INSTRUCTIONS.txt      Short run steps
+  README.txt                Package overview
+  DATASET_GENERATION.txt    DNN dataset tips, train/val split, sample sizes
+  THESIS_DEFENSE_PLAN.txt   How to explain the code in the viva
+  PARAMETER_AND_RUN_GUIDE.txt   This file
+
+================================================================================
