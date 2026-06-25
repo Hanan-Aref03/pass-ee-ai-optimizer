@@ -1,0 +1,224 @@
+THESIS DEFENSE PLAN — How to Explain the MATLAB Simulation Code
+===============================================================
+Use this document as your spoken narrative for the implementation / results chapter
+and for examiner questions. Estimated time for the simulation part: 15–20 minutes.
+
+
+PART 1 — OPENING (1–2 minutes)
+------------------------------
+What to say:
+
+  "My MATLAB simulator compares energy efficiency (EE) between two downlink architectures
+   at 0.3 THz: (1) a conventional base station with three fixed antennas and power control
+   only, and (2) a Pinching Antenna System (PASS) with three waveguides, three pinching
+   antennas per waveguide, and joint optimization of PA positions and transmit powers.
+   Users are randomly placed in a 10 m × 10 m area. Each user must meet a minimum rate
+   (QoS). The figure of merit is EE = sum of user rates divided by total consumed power."
+
+Default parameters (main_pass.m):
+
+  Users Mu .............. 3
+  Area D ................ 10 m
+  BS height H ........... 5 m
+  Carrier f ............. 0.3 THz  (wavelength lambda ≈ 1 mm)
+  Waveguides Nwg ........ 3  (PASS only; conventional borrows this count for Na=3)
+  PAs per waveguide Nt .. 3  (PASS only)
+  QoS R ................. 0.5 bps/Hz
+  BS power budget ....... 20 dBm
+  Circuit power ......... 10 dBm (fixed, in EE denominator)
+  Feasible samples ct ... 100 per QoS value
+
+
+PART 2 — THE TWO MODES (single flag: param.rand_sc) (4–5 minutes)
+-----------------------------------------------------------------
+
+  param.rand_sc = 0  →  CONVENTIONAL
+  param.rand_sc = 1  →  PASS
+
+  There is no third mode. The old "random PASS" mode was removed so the thesis compares
+  two optimized systems fairly.
+
+  A) CONVENTIONAL (rand_sc = 0)
+  -----------------------------
+  - NO waveguides. Nwg = 3 only sets Na = 3 fixed radiating elements.
+  - Antenna positions are FIXED; only transmit powers are optimized (fmincon_fpa.m).
+  - Geometry: vertical array at x = 0, spacing lambda/2 along y:
+      Antenna 1: (x, y, z) = (0, -lambda/2, H)
+      Antenna 2: (x, y, z) = (0, 0, H)
+      Antenna 3: (x, y, z) = (0, +lambda/2, H)
+    At 0.3 THz, lambda/2 ≈ 0.5 mm (compact array at BS center).
+  - User m is served by antenna m; other antennas cause interference.
+  - Output CSV: power_ant1, power_ant2, power_ant3 only.
+
+  B) PASS (rand_sc = 1)
+  ---------------------
+  - THREE waveguides at fixed y positions across the cell; feed at x = -D/2, z = H.
+  - On each waveguide, Nt = 3 pinching antennas (PAs) with optimizable x-positions.
+  - Joint optimization: 9 PA x-coordinates + 3 waveguide powers (fmincon_pass.m).
+  - Channel: free-space LoS to users + waveguide phase from feed to each PA (no
+    waveguide path loss in the corrected model).
+  - User m is associated with waveguide m; PAs on that guide are coherently combined.
+  - Output CSV: 9 PA positions + 3 waveguide powers.
+
+  Waveguide feed coordinates (default D=10 m, Nwg=3):
+
+    WG k   x0 (m)   y0 (m)              z0 (m)
+    ----   ------   ----------------    ------
+     1      -5      -10/3 ≈ -3.33        5
+     2      -5           0               5
+     3      -5      +10/3 ≈ +3.33        5
+
+  PA positions: x ∈ [-5, 5] m on each waveguide line, minimum spacing lambda/2.
+
+
+PART 3 — SOFTWARE ARCHITECTURE (3 minutes)
+------------------------------------------
+Say: "main_pass.m is the driver. It calls fmincon_main.m, which routes to either
+fmincon_fpa (conventional) or fmincon_pass (PASS). Both use channels_gen.m for
+channels, rate_calcul.m for SINR and rates, and pow_total_ee.m for total power."
+
+  main_pass.m
+      │
+      ▼
+  fmincon_main.m  ── rand_sc=0 ──►  fmincon_fpa.m   (optimize 3 powers)
+      │
+      └── rand_sc=1 ──►  fmincon_pass.m  (optimize 9 positions + 3 powers)
+              │
+              ├── obj_ee.m / nonlinear_ee.m / transX_ee.m
+              └── generate_random_pass_positions.m  (initial points only, NOT a mode)
+
+  File roles (one sentence each):
+
+  main_pass.m ............... Monte Carlo over user layouts; save .mat and CSV
+  fmincon_main.m ............ Mode router (two branches only)
+  fmincon_fpa.m ............. Conventional power optimization
+  fmincon_pass.m ............ PASS joint optimization
+  channels_gen.m ............ LoS channels (BS or PA + waveguide phase)
+  rate_calcul.m ............. Per-user SINR and Shannon rate
+  obj_ee_fpa.m / obj_ee.m ... Minimize negative EE
+  nonlinear_ee_fpa.m / nonlinear_ee.m ... Power, QoS, (spacing for PASS)
+  visualize_results.m ....... Plots from one saved .mat file
+  data.m .................... Export full CSV from one .mat file
+  ensureWritableFolder.m .... Writable results if project folder is locked
+
+
+PART 4 — ONE SIMULATION REALIZATION (4 minutes)
+-----------------------------------------------
+Walk through what happens once inside the while loop in main_pass.m:
+
+  1. Random user positions (x, y) uniform in [-D/2, D/2]^2.
+  2. fmincon_main(param) runs the selected optimizer.
+  3. channels_gen builds complex channel coefficients.
+  4. rate_calcul computes R_m for each user from SINR.
+  5. If any R_m < QoS R → discard sample (EE = 0).
+  6. Else store EE = sum(R_m) / (sum(powers) + P_circuit).
+  7. Repeat until 100 feasible samples (or attempt limit).
+
+  Energy efficiency:
+
+    EE = (R_1 + R_2 + R_3) / (P_tx + P_circuit)
+
+  Optimization (both modes use fmincon, interior-point, 10 random starts):
+
+    Conventional: minimize -EE over power vector p subject to sum(p) <= P_bs, R_m >= R.
+    PASS:         minimize -EE over [9 PA x positions; 3 powers] with spacing constraints.
+
+
+PART 5 — MODELING CHOICES TO JUSTIFY (3 minutes)
+-------------------------------------------------
+  Assumption              Implementation              Limitation to mention
+  ----------------        ----------------            ---------------------
+  LoS propagation         1/d amplitude, exp(-j2πd/λ) No blocking / NLOS
+  0.3 THz                 lambda ≈ 1 mm               Short-range THz scenario
+  Waveguide coupling      Phase only (no loss)        Corrected vs older code
+  User association        User m ↔ antenna/wg m       Simplifying assumption
+  PASS combining          Coherent sum on desired wg  Array gain on PASS
+  QoS                     Hard constraint             Infeasible samples dropped
+  Fair element count      Na = Nwg = 3                Same count, different geometry
+
+  Important honesty for examiners:
+
+    "PASS PAs span meters along x on three y-lines. Conventional antennas form a
+     millimeter-scale vertical array at the center. The comparison matches the number
+     of transmit chains (three), not the same physical aperture."
+
+
+PART 6 — HOW TO RUN AND PRESENT RESULTS (2 minutes)
+---------------------------------------------------
+  Conventional run:
+    Set param.rand_sc = 0 in main_pass.m → run → results_conventional_fixed_bs_*.mat
+
+  PASS run:
+    Set param.rand_sc = 1 in main_pass.m → run → results_pass_*.mat
+
+  Compare mean EE printed at the end of each run.
+
+  Figures:
+    Run visualize_results.m on each .mat file.
+    Figure 1 shows antenna/PA geometry and users.
+
+  Optional export:
+    Run data.m on a .mat file → dataset_full_conventional_fixed_bs.csv or dataset_full_pass.csv
+
+
+PART 7 — SUGGESTED DEFENSE SLIDES (10 slides)
+---------------------------------------------
+  1. Title + research question (EE, THz, PASS vs conventional)
+  2. System scenario (10 m area, 3 users, H = 5 m, 0.3 THz)
+  3. Conventional BS: 3 fixed antennas, coordinates, power-only opt
+  4. PASS: waveguides, feeds, PAs, coherent combining (diagram)
+  5. Code block diagram (main_pass → fmincon_main → …)
+  6. Channel and rate equations (one slide)
+  7. Two modes table (rand_sc = 0 vs 1 only)
+  8. Optimization variables and constraints (side-by-side)
+  9. Results: mean EE + one geometry plot per mode
+  10. Limitations and future work
+
+
+PART 8 — ANTICIPATED QUESTIONS AND ANSWERS
+------------------------------------------
+  Q: Why only one flag rand_sc?
+  A: Two architectures, two optimizers. Removing random PASS avoids confusion and
+     ensures both modes use fmincon for a fair EE comparison.
+
+  Q: Does conventional use waveguides?
+  A: No. Nwg sets Na = 3 only. Waveguides exist only when rand_sc = 1.
+
+  Q: What does generate_random_pass_positions do?
+  A: It creates random feasible PA layouts as starting points for fmincon_pass only.
+     It is not a simulation mode.
+
+  Q: What was corrected in the package?
+  A: No effective index or waveguide path loss; phase-only w_tx; conventional vertical
+     lambda/2 array; optimized PASS only; writable output folders.
+
+  Q: Is the comparison fair?
+  A: Yes for optimization (both use fmincon under same QoS and power budget). PASS has
+     more spatial degrees of freedom (9 movable x-positions). State this clearly.
+
+  Q: Why do conventional antennas look like one point on the PASS plot?
+  A: lambda/2 ≈ 0.5 mm vs ±5 m PASS span — different spatial scales by design.
+
+  Q: What if QoS is infeasible?
+  A: Sample discarded; loop retries up to 10×ct attempts.
+
+
+PART 9 — CLOSING SCRIPT (30 seconds)
+------------------------------------
+  "In summary, this code implements a THz downlink simulator with three users and two
+   optimized architectures selected by rand_sc: conventional fixed antennas with power
+   control, and PASS with joint PA placement and power allocation. Channels are LoS with
+   waveguide phase coupling in PASS mode. EE is sum rate over total power under per-user
+   QoS. The framework supports Monte Carlo campaigns, visualization, and CSV export.
+   I acknowledge LoS, fixed association, and asymmetric spatial extent as limitations
+   and directions for future work."
+
+
+PART 10 — REHEARSAL CHECKLIST (day before defense)
+--------------------------------------------------
+  [ ] Run main_pass with rand_sc=0 and rand_sc=1; note where .mat files save
+  [ ] Run visualize_results on each; be ready to explain Figure 1
+  [ ] Write conventional antenna coordinates on one slide
+  [ ] Write waveguide feed coordinates on one slide
+  [ ] Trace fmincon_main on the board in under 30 seconds
+  [ ] State EE formula and feasibility rule from memory

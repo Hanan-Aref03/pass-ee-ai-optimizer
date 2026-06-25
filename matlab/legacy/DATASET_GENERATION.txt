@@ -1,0 +1,73 @@
+PASS Dataset Generation for Deep Learning
+=========================================
+
+Goal
+----
+Train a DNN to predict optimized PASS configuration (9 PA x-positions + 3 powers)
+from user locations and QoS, using labels from fmincon_pass.
+
+Easiest workflow (recommended)
+------------------------------
+1. Open generate_pass_dataset.m
+2. Set:
+      target_samples = 500   (start small; increase later)
+      fmincon_fast = true    (much faster; good for ML labels)
+      param.R = 0.5
+3. Run the script once (can run overnight for 2000+ samples)
+4. Use the two CSV files written to csv_data/:
+      dataset_input_pass_ml_<timestamp>.csv
+      dataset_output_pass_ml_<timestamp>.csv
+
+Input columns:  user1_x, user1_y, user2_x, user2_y, user3_x, user3_y, QoS_R
+Output columns: PA1x1..PA3x3, power_wg1..power_wg3
+
+Why not run main_pass many times?
+---------------------------------
+- main_pass is built for thesis Monte Carlo + one CSV per run
+- generate_pass_dataset.m appends rows to ONE dataset, prints progress, and checkpoints
+- fmincon_fast reduces time per sample (3 restarts, Display off, lower MaxIter)
+
+Speed tips
+----------
+- fmincon_fast = true in generate_pass_dataset.m (default there)
+- Start with target_samples = 50 to measure minutes/sample on your PC
+- Do NOT use Display iter during batch runs
+- For final thesis-quality labels on a subset, run a few samples with fmincon_fast = false
+
+Dataset size guidance
+---------------------
+  Samples     Use case
+  -------     --------
+  500–1000    Prototype DNN, proof of concept
+  2000–5000   Solid training set
+  10000+      Best generalization (long runtime)
+
+Diversity tips (optional, edit generate_pass_dataset.m)
+-------------------------------------------------------
+- Loop over several QoS values: R in [0.3, 0.5, 0.7]
+- Vary param.D or param.pbs in outer loop for more scenarios
+- Reject duplicates: skip if user layout is very close to a stored sample
+
+Train/validation/test split
+---------------------------
+In Python (sklearn) or MATLAB:
+  70% train, 15% validation, 15% test (shuffle rows first, fixed random seed)
+
+DNN role in the thesis
+----------------------
+  Offline:  fmincon_pass  ->  CSV labels  ->  train DNN
+  Online:   user positions  ->  DNN forward pass  ->  predicted PASS config (fast)
+
+Verify a few DNN predictions by running channels_gen + rate_calcul with predicted
+positions/powers and checking QoS is met.
+
+Combining multiple batch runs
+-----------------------------
+Append CSVs in Excel/Python/pandas, or increase target_samples in one run.
+Checkpoint .mat files are saved every 50 samples in dataset_checkpoints/.
+
+Parallel runs (advanced)
+------------------------
+If you have Parallel Computing Toolbox, run two MATLAB sessions with different
+output timestamps (split target_samples across machines). Merge CSVs afterward.
+Do not run two scripts writing the same CSV file.
