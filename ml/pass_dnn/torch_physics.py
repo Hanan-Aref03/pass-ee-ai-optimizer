@@ -103,87 +103,86 @@ def evaluate_pass_batch_torch(
     outputs: torch.Tensor,
     config: SystemConfig,
 ) -> PassPhysicsTorchBatch:
-    """Evaluate PASS configs with differentiable torch operations."""
+    """Vectorized PASS evaluation — fully batched, no per-sample loop.
+
+    Replaces the original per-sample for-loop that caused OOM on large batches
+    by accumulating thousands of small autograd nodes during backward().
+    """
 
     users, qos = _reshape_inputs(inputs, config)
     positions, powers = _reshape_outputs(outputs, config)
+    # positions: (B, W, P)  powers: (B, W)  users: (B, U, 2)  qos: (B,)
 
-    n_samples = outputs.shape[0]
-    rates = torch.zeros((n_samples, config.num_users), device=outputs.device, dtype=outputs.dtype)
-    sum_rate = torch.zeros(n_samples, device=outputs.device, dtype=outputs.dtype)
-    total_power = powers.sum(dim=1).to(outputs.dtype)
-    energy_efficiency = torch.zeros(n_samples, device=outputs.device, dtype=outputs.dtype)
-    qos_margin = torch.zeros((n_samples, config.num_users), device=outputs.device, dtype=outputs.dtype)
-    qos_satisfied = torch.zeros(n_samples, device=outputs.device, dtype=torch.bool)
+    device = outputs.device
+    dtype = outputs.dtype
 
-    betay = build_waveguide_y_positions_torch(config, outputs.device, outputs.dtype)
-    loc0_x = torch.tensor(-config.area_side_m / 2.0, device=outputs.device, dtype=outputs.dtype)
+    betay = build_waveguide_y_positions_torch(config, device, dtype)
+    loc0_x = torch.tensor(-config.area_side_m / 2.0, device=device, dtype=dtype)
     ple = torch.tensor(
         config.speed_of_light_m_s / (4.0 * math.pi * config.carrier_frequency_thz * 1e12),
-        device=outputs.device,
-        dtype=outputs.dtype,
+        device=device, dtype=dtype,
     )
-    lambda_m = torch.tensor(config.wavelength_m, device=outputs.device, dtype=outputs.dtype)
-    noise = torch.tensor(thermal_noise_power_w(), device=outputs.device, dtype=outputs.dtype)
+    lambda_m = torch.tensor(config.wavelength_m, device=device, dtype=dtype)
+    noise = torch.tensor(thermal_noise_power_w(), device=device, dtype=dtype)
 
-    for sample_idx in range(n_samples):
-        tx_u = torch.zeros(
-            (config.num_pinchers, config.num_waveguides, config.num_users),
-            dtype=torch.complex64,
-            device=outputs.device,
-        )
-        w_tx = torch.zeros(
-            (config.num_pinchers, config.num_waveguides),
-            dtype=torch.complex64,
-            device=outputs.device,
-        )
+    # ── Waveguide phase weights ──────────────────────────────────────────────
+    # w_tx[b, w, p] = exp(j * -2π * |positions[b,w,p] - loc0_x| / λ)
+    dist_w = torch.abs(positions - loc0_x)               # (B, W, P)
+    phase_w = -2.0 * math.pi * dist_w / lambda_m         # (B, W, P)
+    w_tx = torch.exp(1j * phase_w.to(torch.complex64))   # (B, W, P)
 
-        for wg_idx in range(config.num_waveguides):
-            for pincher_idx in range(config.num_pinchers):
-                beta = positions[sample_idx, wg_idx, pincher_idx]
-                dist_w = torch.abs(beta - loc0_x)
-                phase_w = -2.0 * math.pi * dist_w / lambda_m
-                w_tx[pincher_idx, wg_idx] = torch.exp(1j * phase_w.to(torch.complex64))
+    # ── Air-channel matrix ───────────────────────────────────────────────────
+    # tx_u[b, w, p, u] = ple/dist * exp(j * -2π * dist / λ)
+    # dx[b,w,p,u] = positions[b,w,p] - users[b,u,0]
+    pos_x = positions.unsqueeze(3)                         # (B, W, P, 1)
+    user_x = users[:, :, 0].unsqueeze(1).unsqueeze(1)     # (B, 1, 1, U)
+    user_y = users[:, :, 1].unsqueeze(1).unsqueeze(1)     # (B, 1, 1, U)
+    betay_b = betay.reshape(1, -1, 1, 1)                   # (1, W, 1, 1)
 
-                for user_idx in range(config.num_users):
-                    dx = beta - users[sample_idx, user_idx, 0]
-                    dy = betay[wg_idx] - users[sample_idx, user_idx, 1]
-                    dist = torch.sqrt(dx * dx + dy * dy + config.transmitter_height_m * config.transmitter_height_m)
-                    phase = -2.0 * math.pi * dist / lambda_m
-                    tx_u[pincher_idx, wg_idx, user_idx] = (
-                        ple / dist * torch.exp(1j * phase.to(torch.complex64))
-                    )
+    dx = pos_x - user_x                                    # (B, W, P, U)
+    dy = betay_b - user_y                                  # (B, W, P, U)
+    dist = torch.sqrt(dx * dx + dy * dy + config.transmitter_height_m ** 2)
+    phase_tx = -2.0 * math.pi * dist / lambda_m
+    tx_u = (ple / dist) * torch.exp(1j * phase_tx.to(torch.complex64))  # (B, W, P, U)
 
-        for user_idx in range(config.num_users):
-            desired_signal = torch.zeros((), dtype=torch.complex64, device=outputs.device)
-            for pincher_idx in range(config.num_pinchers):
-                desired_signal = desired_signal + tx_u[pincher_idx, user_idx, user_idx] * w_tx[pincher_idx, user_idx]
+    # ── Desired signal: user u served by waveguide u (diagonal) ─────────────
+    # desired_signal[b, u] = Σ_p  tx_u[b, u, p, u] * w_tx[b, u, p]
+    # tx_u[b, u, p, u] = diagonal over (W, U) dims after permuting P to last.
+    # tx_u.permute(0,1,3,2): (B, W, U, P)
+    # diagonal(dim1=1, dim2=2) → (B, P, U)  where result[b,p,u]=tx_u[b,u,p,u]
+    # permute(0,2,1) → (B, U, P)
+    tx_u_self = torch.diagonal(
+        tx_u.permute(0, 1, 3, 2), dim1=1, dim2=2
+    ).permute(0, 2, 1).contiguous()                        # (B, U, P) complex
+    # w_tx for waveguide u matches user u (W == U, same ordering)
+    desired_signal = (tx_u_self * w_tx).sum(dim=2)         # (B, U) complex
 
-            desired_power = powers[sample_idx, user_idx] * (torch.abs(desired_signal) ** 2)
+    # ── Interference signal ──────────────────────────────────────────────────
+    # interf[b, w, u] = Σ_p tx_u[b, w, p, u] * w_tx[b, w, p]
+    interf_signal = (tx_u * w_tx.unsqueeze(3)).sum(dim=2)  # (B, W, U) complex
+    # interference_power[b, wg, u] = powers[b,wg] * |interf[b,wg,u]|²
+    interf_power = powers.unsqueeze(2) * torch.abs(interf_signal) ** 2   # (B, W, U)
+    # Zero out diagonal (serving waveguide wg==u is desired, not interference)
+    diag = torch.eye(config.num_users, device=device, dtype=torch.bool)
+    interference_power = interf_power.masked_fill(diag.unsqueeze(0), 0.0).sum(dim=1)  # (B, U)
 
-            interference_power = torch.zeros((), dtype=outputs.dtype, device=outputs.device)
-            for wg_idx in range(config.num_waveguides):
-                if wg_idx == user_idx:
-                    continue
-                interf_signal = torch.zeros((), dtype=torch.complex64, device=outputs.device)
-                for pincher_idx in range(config.num_pinchers):
-                    interf_signal = interf_signal + tx_u[pincher_idx, wg_idx, user_idx] * w_tx[pincher_idx, wg_idx]
-                interference_power = interference_power + powers[sample_idx, wg_idx] * (torch.abs(interf_signal) ** 2)
+    # ── SINR and per-user rates ──────────────────────────────────────────────
+    desired_power = powers * torch.abs(desired_signal) ** 2   # (B, U), powers (B,W=U)
+    sinr = desired_power / (interference_power + noise)        # (B, U)
+    rates = torch.log2(1.0 + sinr)                            # (B, U)
 
-            sinr = desired_power / (interference_power + noise)
-            rates[sample_idx, user_idx] = torch.log2(1.0 + sinr)
-
-        sum_rate[sample_idx] = rates[sample_idx].sum()
-        energy_efficiency[sample_idx] = sum_rate[sample_idx] / (total_power[sample_idx] + config.circuit_power_w)
-        qos_margin[sample_idx] = rates[sample_idx] - qos[sample_idx]
-        qos_satisfied[sample_idx] = bool(torch.all(rates[sample_idx] >= qos[sample_idx]))
+    total_power = powers.sum(dim=1)                            # (B,)
+    sum_rate = rates.sum(dim=1)                                # (B,)
+    energy_efficiency = sum_rate / (total_power + config.circuit_power_w)
+    qos_margin = rates - qos.unsqueeze(1)                      # (B, U)
+    qos_satisfied = (qos_margin >= 0.0).all(dim=1)             # (B,)
 
     return PassPhysicsTorchBatch(
-        rates=rates,
-        sum_rate=sum_rate,
-        total_power=total_power,
-        energy_efficiency=energy_efficiency,
-        qos_margin=qos_margin,
+        rates=rates.to(dtype),
+        sum_rate=sum_rate.to(dtype),
+        total_power=total_power.to(dtype),
+        energy_efficiency=energy_efficiency.to(dtype),
+        qos_margin=qos_margin.to(dtype),
         qos_satisfied=qos_satisfied,
     )
 

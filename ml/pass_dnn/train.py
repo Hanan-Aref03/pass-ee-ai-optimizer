@@ -302,6 +302,7 @@ def run_epoch(
     feasibility_negative_power_scale_min: float = 0.10,
     feasibility_negative_power_scale_max: float = 0.55,
     physics_loss_weight: float = 1.0,
+    power_loss_weight: float = 1.0,
 ) -> tuple[float, float, float]:
     training = optimizer is not None
     model.train(training)
@@ -335,7 +336,7 @@ def run_epoch(
             pow_loss = _reduce_per_sample(criterion(outputs["powers"], pow_target))
             batch_pos_loss = _weighted_mean(pos_loss, sample_weights)
             batch_pow_loss = _weighted_mean(pow_loss, sample_weights)
-            regression_loss = _weighted_mean(pos_loss + pow_loss, sample_weights)
+            regression_loss = _weighted_mean(pos_loss + power_loss_weight * pow_loss, sample_weights)
 
             feasibility_loss = torch.tensor(0.0, device=device)
             if "feasibility_logit" in outputs and aux_targets is not None:
@@ -920,7 +921,7 @@ def build_argument_parser() -> argparse.ArgumentParser:
         "--feasibility-head",
         dest="feasibility_head",
         action="store_true",
-        default=True,
+        default=False,  # disabled: too few infeasible samples for meaningful classification
         help="Train a separate PASS feasibility head.",
     )
     parser.add_argument(
@@ -1000,6 +1001,18 @@ def build_argument_parser() -> argparse.ArgumentParser:
         type=float,
         default=1.0,
         help="Weight for the differentiable PASS QoS violation penalty.",
+    )
+    parser.add_argument(
+        "--power-loss-weight",
+        type=float,
+        default=10.0,
+        help="Multiplier on the power-head loss relative to the position-head loss.",
+    )
+    parser.add_argument(
+        "--warmup-power-epochs",
+        type=int,
+        default=5,
+        help="Epochs to train the power head alone before joint training.",
     )
     parser.add_argument(
         "--grad-clip",
@@ -1135,6 +1148,14 @@ def train_main(args: argparse.Namespace) -> TrainResult:
     optimizer = torch.optim.AdamW(
         model.parameters(), lr=args.lr, weight_decay=args.weight_decay
     )
+    # Warmup optimizer: only updates power head to break power-collapse before joint training
+    warmup_optimizer = (
+        torch.optim.AdamW(
+            model.power_head.parameters(), lr=args.lr * 2, weight_decay=args.weight_decay
+        )
+        if args.warmup_power_epochs > 0 and bundle.schema.mode == "pass"
+        else None
+    )
     criterion = nn.SmoothL1Loss(reduction="none") if args.criterion == "huber" else nn.MSELoss(reduction="none")
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
         optimizer,
@@ -1160,6 +1181,8 @@ def train_main(args: argparse.Namespace) -> TrainResult:
         "infeasible_sample_weight": float(args.infeasible_sample_weight),
         "feasible_sample_boost": float(args.feasible_sample_boost),
         "physics_loss_weight": float(args.physics_loss_weight),
+        "power_loss_weight": float(args.power_loss_weight),
+        "warmup_power_epochs": int(args.warmup_power_epochs),
         "grad_clip": float(args.grad_clip),
         "lr_scheduler_patience": int(args.lr_scheduler_patience),
         "lr_scheduler_factor": float(args.lr_scheduler_factor),
@@ -1172,6 +1195,8 @@ def train_main(args: argparse.Namespace) -> TrainResult:
     history: list[dict] = []
 
     for epoch in range(1, args.epochs + 1):
+        is_warmup = warmup_optimizer is not None and epoch <= args.warmup_power_epochs
+        active_optimizer = warmup_optimizer if is_warmup else optimizer
         train_loss, train_pos_loss, train_pow_loss = run_epoch(
             model,
             train_loader,
@@ -1179,7 +1204,7 @@ def train_main(args: argparse.Namespace) -> TrainResult:
             bundle.schema,
             config,
             criterion,
-            optimizer=optimizer,
+            optimizer=active_optimizer,
             grad_clip=args.grad_clip,
             regression_loss_weight=args.regression_loss_weight,
             feasibility_loss_weight=args.feasibility_loss_weight,
@@ -1189,6 +1214,7 @@ def train_main(args: argparse.Namespace) -> TrainResult:
             feasibility_negative_power_scale_min=args.feasibility_negative_power_scale_min,
             feasibility_negative_power_scale_max=args.feasibility_negative_power_scale_max,
             physics_loss_weight=args.physics_loss_weight,
+            power_loss_weight=args.power_loss_weight,
         )
         val_loss, val_pos_loss, val_pow_loss = run_epoch(
             model,
@@ -1206,6 +1232,7 @@ def train_main(args: argparse.Namespace) -> TrainResult:
             feasibility_negative_power_scale_min=args.feasibility_negative_power_scale_min,
             feasibility_negative_power_scale_max=args.feasibility_negative_power_scale_max,
             physics_loss_weight=args.physics_loss_weight,
+            power_loss_weight=args.power_loss_weight,
         )
         scheduler.step(val_loss)
 
@@ -1222,8 +1249,9 @@ def train_main(args: argparse.Namespace) -> TrainResult:
             }
         )
 
+        mode_tag = "[warmup]" if is_warmup else ""
         print(
-            f"Epoch {epoch:03d} | train={train_loss:.6f} | val={val_loss:.6f} | lr={optimizer.param_groups[0]['lr']:.2e}"
+            f"Epoch {epoch:03d}{mode_tag} | train={train_loss:.6f} | val={val_loss:.6f} | lr={optimizer.param_groups[0]['lr']:.2e}"
         )
 
         if val_loss + 1e-8 < best_val_loss:
@@ -1254,6 +1282,7 @@ def train_main(args: argparse.Namespace) -> TrainResult:
         feasibility_negative_power_scale_min=args.feasibility_negative_power_scale_min,
         feasibility_negative_power_scale_max=args.feasibility_negative_power_scale_max,
         physics_loss_weight=args.physics_loss_weight,
+        power_loss_weight=args.power_loss_weight,
     )
     pred_result = predict_normalized(
         model,

@@ -81,11 +81,13 @@ class PassDnnRegressor(nn.Module):
                 nn.Linear(width // 2, position_dim),
                 nn.Tanh(),
             )
+            # Input = backbone features + predicted positions so power learns to be
+            # jointly consistent with positions (breaks the chicken-and-egg collapse).
             self.power_head = nn.Sequential(
-                nn.Linear(width, width // 2),
+                nn.Linear(width + position_dim, width // 2),
                 nn.SiLU(),
                 nn.Linear(width // 2, power_dim),
-                nn.Sigmoid(),
+                # No Sigmoid — clamped in forward() to prevent saturation collapse
             )
             self.feasibility_head = (
                 nn.Sequential(
@@ -113,7 +115,6 @@ class PassDnnRegressor(nn.Module):
                 nn.Linear(width, width // 2),
                 nn.SiLU(),
                 nn.Linear(width // 2, power_dim),
-                nn.Sigmoid(),
             )
 
     def _feasibility_input(
@@ -161,9 +162,11 @@ class PassDnnRegressor(nn.Module):
         h = self.post_norm(h)
 
         if self.mode == "pass":
+            positions = self.position_head(h)
+            power_input = torch.cat([h, positions], dim=1)
             output = {
-                "positions": self.position_head(h),
-                "powers": self.power_head(h),
+                "positions": positions,
+                "powers": torch.clamp(self.power_head(power_input), 0.0, 1.0),
             }
             if self.feasibility_head is not None:
                 if self.feasibility_conditioning == "hidden":
@@ -178,4 +181,4 @@ class PassDnnRegressor(nn.Module):
                 output["feasibility_prob"] = torch.sigmoid(output["feasibility_logit"])
             return output
 
-        return {"powers": self.power_head(h)}
+        return {"powers": torch.clamp(self.power_head(h), 0.0, 1.0)}
