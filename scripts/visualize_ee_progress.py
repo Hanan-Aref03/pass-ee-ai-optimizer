@@ -61,7 +61,7 @@ METHODS = [
     ("MATLAB solver",            None,   78.55, 3.769,  38.0,  BLUE,   "//"),
     ("DNN raw (no refinement)",  0.449,  25.56, 1.644,  None,  GRAY,   ""),
     ("Single-phase λ=0.001",     0.942,  49.49, 3.106,  None,  ORANGE, ""),
-    ("Two-phase λ=0.05 (B)",     0.977,  52.03, 4.549,  77.0,  PURPLE, ""),
+    ("AO, 1-init (baseline)",    0.731,  53.09, 1.909,  26.0,  RED,    ""),
     ("Two-phase+pp (C)",         0.978,  53.45, 4.483,  74.0,  TEAL,   ""),
     ("Power-only Adam (E)",      0.978,  57.91, 4.322,  65.0,  GOLD,   ""),
     ("Fast Dinkelbach (G, ours)",0.986,  78.27, 2.664,  24.0,  GREEN,  ""),
